@@ -60,25 +60,10 @@ class XGBConverter:
     @staticmethod
     def _add_node(attr_pairs, is_classifier, tree_id, tree_weight, node_id,
                   feature_id, mode, value, true_child_id, false_child_id, weights, weight_id_bias,
-                  missing, hitrate):
+                  missing, hitrate, feature_list):
+
         if isinstance(feature_id, str):
-            # Something like f0, f1...
-            if feature_id[0] == "f":
-                try:
-                    feature_id = int(feature_id[1:])
-                except ValueError:
-                    raise RuntimeError(
-                        "Unable to interpret '{0}', feature "
-                        "names should follow pattern 'f%d'.".format(
-                            feature_id))
-            else:
-                try:
-                    feature_id = int(float(feature_id))
-                except ValueError:
-                    raise RuntimeError(
-                        "Unable to interpret '{0}', feature "
-                        "names should follow pattern 'f%d'.".format(
-                            feature_id))
+            feature_id = feature_list.index(feature_id)
 
         # Split condition for sklearn
         # * if X_ptr[X_sample_stride * i + X_fx_stride * node.feature] <= node.threshold:
@@ -112,7 +97,7 @@ class XGBConverter:
                     attr_pairs['target_weights'].append(float(tree_weight * w))
 
     @staticmethod
-    def _fill_node_attributes(treeid, tree_weight, jsnode, attr_pairs, is_classifier, remap):
+    def _fill_node_attributes(treeid, tree_weight, jsnode, attr_pairs, is_classifier, remap, feature_list):
         if 'children' in jsnode:
             XGBConverter._add_node(attr_pairs=attr_pairs, is_classifier=is_classifier,
                         tree_id=treeid, tree_weight=tree_weight,
@@ -123,11 +108,12 @@ class XGBConverter:
                         false_child_id=remap[jsnode['no']], # ['children'][1]['nodeid'],
                         weights=None, weight_id_bias=None,
                         missing=jsnode.get('missing', -1) == jsnode['yes'], # ['children'][0]['nodeid'],
-                        hitrate=jsnode.get('cover', 0))
+                        hitrate=jsnode.get('cover', 0),
+                        feature_list=feature_list)
 
             for ch in jsnode['children']:
                 if 'children' in ch or 'leaf' in ch:
-                    XGBConverter._fill_node_attributes(treeid, tree_weight, ch, attr_pairs, is_classifier, remap)
+                    XGBConverter._fill_node_attributes(treeid, tree_weight, ch, attr_pairs, is_classifier, remap, feature_list)
                 else:
                     raise RuntimeError("Unable to convert this node {0}".format(ch))
 
@@ -140,7 +126,8 @@ class XGBConverter:
                         feature_id=0, mode='LEAF',
                         true_child_id=0, false_child_id=0,
                         weights=weights, weight_id_bias=weights_id_bias,
-                        missing=False, hitrate=jsnode.get('cover', 0))
+                        missing=False, hitrate=jsnode.get('cover', 0),
+                        feature_list=feature_list)
 
     @staticmethod
     def _remap_nodeid(jsnode, remap=None):
@@ -154,12 +141,12 @@ class XGBConverter:
         return remap
 
     @staticmethod
-    def fill_tree_attributes(js_xgb_node, attr_pairs, tree_weights, is_classifier):
+    def fill_tree_attributes(js_xgb_node, attr_pairs, tree_weights, is_classifier, feature_list):
         if not isinstance(js_xgb_node, list):
             raise TypeError("js_xgb_node must be a list")
         for treeid, (jstree, w) in enumerate(zip(js_xgb_node, tree_weights)):
             remap = XGBConverter._remap_nodeid(jstree)
-            XGBConverter._fill_node_attributes(treeid, w, jstree, attr_pairs, is_classifier, remap)
+            XGBConverter._fill_node_attributes(treeid, w, jstree, attr_pairs, is_classifier, remap, feature_list)
 
 
 class XGBRegressorConverter(XGBConverter):
@@ -191,8 +178,8 @@ class XGBRegressorConverter(XGBConverter):
         best_ntree_limit = getattr(bst, 'best_ntree_limit', len(js_trees))
         if best_ntree_limit < len(js_trees):
             js_trees = js_trees[:best_ntree_limit]
-
-        XGBConverter.fill_tree_attributes(js_trees, attr_pairs, [1 for _ in js_trees], False)
+        feature_list = xgb_node.get_booster().feature_names
+        XGBConverter.fill_tree_attributes(js_trees, attr_pairs, [1 for _ in js_trees], False, feature_list)
 
         # add nodes
         container.add_node('TreeEnsembleRegressor', operator.input_full_names,
@@ -226,8 +213,9 @@ class XGBClassifierConverter(XGBConverter):
         objective, base_score, js_trees = XGBConverter.common_members(xgb_node, inputs)
 
         params = XGBConverter.get_xgb_params(xgb_node)
+        feature_list = xgb_node.get_booster().feature_names
         attr_pairs = XGBClassifierConverter._get_default_tree_attribute_pairs()
-        XGBConverter.fill_tree_attributes(js_trees, attr_pairs, [1 for _ in js_trees], True)
+        XGBConverter.fill_tree_attributes(js_trees, attr_pairs, [1 for _ in js_trees], True, feature_list)
         ncl = (max(attr_pairs['class_treeids']) + 1) // params['n_estimators']
 
         bst = xgb_node.get_booster()
@@ -235,7 +223,7 @@ class XGBClassifierConverter(XGBConverter):
         if 0 < best_ntree_limit < len(js_trees):
             js_trees = js_trees[:best_ntree_limit]
             attr_pairs = XGBClassifierConverter._get_default_tree_attribute_pairs()
-            XGBConverter.fill_tree_attributes(js_trees, attr_pairs, [1 for _ in js_trees], True)
+            XGBConverter.fill_tree_attributes(js_trees, attr_pairs, [1 for _ in js_trees], True, feature_list)
 
         if len(attr_pairs['class_treeids']) == 0:
             raise RuntimeError("XGBoost model is empty.")
